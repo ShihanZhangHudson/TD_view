@@ -1,0 +1,108 @@
+//@version=5
+indicator("Shihan's Pure PA + Vol + POC (V6.0)", overlay=true)
+
+// ==========================================
+// 1. 锤子线 (做多形态) 独立调节面板
+// ==========================================
+grp_hammer = "--- 锤子线 (做多形态) 设置 ---"
+hamWickRatio = input.float(2.0, "【锤子】下影线 至少 是实体的几倍？", step=0.5, group=grp_hammer)
+hamHeadRatio = input.float(0.5, "【锤子】上影线 最多 是实体的几倍？", step=0.1, group=grp_hammer)
+
+// ==========================================
+// 2. 流星线 (做空形态) 独立调节面板
+// ==========================================
+grp_star = "--- 流星线 (做空形态) 设置 ---"
+starWickRatio = input.float(2.0, "【流星】上影线 至少 是实体的几倍？", step=0.5, group=grp_star)
+starHeadRatio = input.float(0.5, "【流星】下影线 最多 是实体的几倍？", step=0.1, group=grp_star)
+
+// ==========================================
+// 3. POC (多空平衡形态) 独立调节面板
+// ==========================================
+grp_poc = "--- POC (多空平衡形态) 设置 ---"
+pocWickRatio = input.float(1.5, "POC 上下影线 至少 是实体的几倍？", step=0.1, group=grp_poc)
+pocSymRatio  = input.float(0.6, "POC 对称度 (短影线/长影线, 越近1越完美)", step=0.1, maxval=1.0, group=grp_poc)
+strictPOC    = input.bool(false, "POC 严格突破模式 (要求突破最高/低价，而非仅突破收盘价)", group=grp_poc)
+
+// ==========================================
+// 4. 成交量基准 (Volume Baseline) 独立调节面板
+// ==========================================
+grp_vol = "--- 成交量过滤设置 ---"
+volLen  = input.int(50, "成交量均线周期", group=grp_vol)
+volMult = input.float(1.5, "放量阈值 (如 1.5 倍)", step=0.1, group=grp_vol)
+
+
+// ==========================================
+// 5. 第一根：特征与成交量解剖 (Setup)
+// ==========================================
+// 获取上一根 K 线数据
+prevOpen  = open[1]
+prevClose = close[1]
+prevHigh  = high[1]
+prevLow   = low[1]
+prevVol   = volume[1]
+
+// 计算实体与影线
+prevBody  = math.abs(prevClose - prevOpen)
+prevUpper = prevHigh - math.max(prevOpen, prevClose)
+prevLower = math.min(prevOpen, prevClose) - prevLow
+
+// 核心：计算前一根 K 线是否【爆量】
+prevVolAvg = ta.sma(volume, volLen)[1]
+isPrevVolHigh = prevVol > (prevVolAvg * volMult)
+
+// A. 识别锤子 (使用独立的 hamWickRatio 和 hamHeadRatio)
+isPrevHammer = (prevLower >= prevBody * hamWickRatio) and (prevUpper <= prevBody * hamHeadRatio) and (prevBody > 0)
+
+// B. 识别流星 (使用独立的 starWickRatio 和 starHeadRatio)
+isPrevStar   = (prevUpper >= prevBody * starWickRatio) and (prevLower <= prevBody * starHeadRatio) and (prevBody > 0)
+
+// C. 识别 POC (长影线 + 对称 + 必须爆量！)
+symmetry  = math.min(prevUpper, prevLower) / math.max(prevUpper, prevLower, 0.0001)
+isPrevPOC = (prevUpper >= prevBody * pocWickRatio) and (prevLower >= prevBody * pocWickRatio) and (symmetry >= pocSymRatio) and (prevBody > 0)
+
+// 重要 POC：只要 POC 形态成立，且包含大 Volume，就是重要 POC
+isImportantPOC = isPrevPOC and isPrevVolHigh
+
+
+// ==========================================
+// 6. 第二根：量价确认 (Trigger)
+// ==========================================
+// 当前 K 线也可能爆量 (用于辅助锤子流星)
+currVolAvg = ta.sma(volume, volLen)
+isCurrVolHigh = volume > (currVolAvg * volMult)
+validVolForPA = isPrevVolHigh or isCurrVolHigh
+
+// --- 锤子/流星 确认逻辑 ---
+paBuy  = isPrevHammer and (close > prevHigh) and validVolForPA
+paSell = isPrevStar   and (close < prevLow)  and validVolForPA
+
+// --- POC 确认逻辑 ---
+pocBuyTrigger  = strictPOC ? (close > prevHigh) : (close > prevClose)
+pocSellTrigger = strictPOC ? (close < prevLow)  : (close < prevClose)
+
+pocBuy  = isImportantPOC and pocBuyTrigger
+pocSell = isImportantPOC and pocSellTrigger
+
+// ==========================================
+// 7. 综合信号与可视化
+// ==========================================
+finalBuy  = paBuy or pocBuy
+finalSell = paSell or pocSell
+
+// 标记潜在 Setup (灰色，提醒盯盘)
+plotshape(isPrevHammer and not finalBuy, title="Wait Hammer", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 60), size=size.tiny, offset=-1)
+plotshape(isPrevStar and not finalSell,  title="Wait Star",   style=shape.circle, location=location.abovebar, color=color.new(color.gray, 60), size=size.tiny, offset=-1)
+plotshape(isImportantPOC and not (pocBuy or pocSell), title="Wait POC", style=shape.diamond, location=location.abovebar, color=color.new(color.blue, 50), size=size.tiny, offset=-1)
+
+// 标记确认进场
+plotshape(paBuy,  title="HAMMER BUY", text="PA BUY",   style=shape.labelup,   location=location.belowbar, color=color.green, size=size.small, textcolor=color.white)
+plotshape(paSell, title="STAR SELL",  text="PA SELL",  style=shape.labeldown, location=location.abovebar, color=color.red,   size=size.small, textcolor=color.white)
+
+plotshape(pocBuy,  title="POC BUY",   text="POC UP",   style=shape.labelup,   location=location.belowbar, color=color.teal,  size=size.small, textcolor=color.white)
+plotshape(pocSell, title="POC SELL",  text="POC DOWN", style=shape.labeldown, location=location.abovebar, color=color.maroon,size=size.small, textcolor=color.white)
+
+// ==========================================
+// 8. 报警系统
+// ==========================================
+alertcondition(finalBuy,  "Volume Buy",  "爆量形态确认：做多！")
+alertcondition(finalSell, "Volume Sell", "爆量形态确认：做空！")
