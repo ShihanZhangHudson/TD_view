@@ -1,209 +1,120 @@
 //@version=5
-indicator("Shihan's Pure PA + Vol + POC (V14.0)", overlay=true, max_lines_count=500, max_labels_count=500)
+// 5000 AUD 本金，20 倍杠杆模拟
+strategy("Shihan's Pure PA + Vol + POC (V16.7)", overlay=true, initial_capital=5000, currency=currency.AUD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, margin_long=5, margin_short=5, max_lines_count=500, max_labels_count=500)
 
 // ==========================================
-// 1. 核心交易模式选择 (Master Switch)
+// 1. 宏观引力场设置 (Macro Filter Settings)
 // ==========================================
-grp_mode = "--- 核心交易模式选择 ---"
-tradeMode = input.string("3. PA + POC (双模式共存)", "请选择启用的信号模式", options=["1. PA 模式 (锤子/流星)", "2. POC 模式 (多空平衡)", "3. PA + POC (双模式共存)"], group=grp_mode)
-enablePA  = (tradeMode == "1. PA 模式 (锤子/流星)") or (tradeMode == "3. PA + POC (双模式共存)")
-enablePOC = (tradeMode == "2. POC 模式 (多空平衡)") or (tradeMode == "3. PA + POC (双模式共存)")
+grp_macro = "--- 机构博弈引力场过滤 ---"
+useMacroFilter = input.bool(true, "启用宏微观联动过滤", tooltip="开启后，只有在昨日盘面 POC 附近的信号才会触发下单", group=grp_macro)
+proxTicks = input.int(20, "引力场宽度 (Ticks)", tooltip="信号距离昨日 POC 多少 Ticks 内视为有效", group=grp_macro)
 
-// ==========================================
-// 2. 自动止盈止损与挂单设置 (全新升级)
-// ==========================================
-grp_sr = "--- 自动止盈止损与 RR 设置 ---"
-slMode = input.string("1. 紧贴形态极值 (最优盈亏比)", "止损防线选择", options=["1. 紧贴形态极值 (最优盈亏比)", "2. 宽松波段极值 (防守空间更大)"], group=grp_sr)
-// 修复：改用 Ticks(跳动点) 而非绝对金额，兼容外汇和加密货币
-slTicks = input.int(10, "止损猎杀缓冲 (Ticks/跳动点数)", group=grp_sr) 
-
-targetMode = input.string("1. 波段高低点 (S/R)", "止盈目标模式", options=["1. 波段高低点 (S/R)", "2. 固定自定义盈亏比 (Fixed RR)"], group=grp_sr)
-customRR = input.float(1.5, "自定义/保底 盈亏比 (RR)", step=0.1, group=grp_sr)
-
-swingLen = input.int(20, "波段高低点周期 (Swing Length)", group=grp_sr)
+grp_sess = "--- 盘面时间设置 (AEDT) ---"
+asiaSessTime  = input.session("1000-1800", "亚洲盘", group=grp_sess)
+londonSessTime = input.session("1800-2300", "欧洲盘", group=grp_sess)
+nySessTime     = input.session("2300-0800", "纽约盘", group=grp_sess)
 
 // ==========================================
-// 3. 进场突破模式 (Trigger) 设置
+// 2. 视觉自定义设置
 // ==========================================
-grp_trigger = "--- 进场突破模式 (Trigger) 设置 ---"
-modePA  = input.string("宽松模式 (突破实体)", "PA(锤/流星) 突破标准", options=["严格模式 (突破影线极值)", "宽松模式 (突破实体)"], group=grp_trigger)
-modePOC = input.string("严格模式 (突破影线极值)", "POC(平衡) 突破标准", options=["严格模式 (突破影线极值)", "宽松模式 (突破收盘价)"], group=grp_trigger)
-isStrictPA  = (modePA == "严格模式 (突破影线极值)")
-isStrictPOC = (modePOC == "严格模式 (突破影线极值)")
-
-// ==========================================
-// 4. 宏观价值区域 (VAH / VAL) 设置
-// ==========================================
-grp_va = "--- 宏观价值区域 (Value Area) 设置 ---"
-showVA = input.bool(true, "显示日内 VAH / VAL", group=grp_va)
-sdMult = input.float(1.0, "价值区标准差乘数", step=0.1, group=grp_va)
+grp_visual = "--- 视觉设置 ---"
+asiaPocColor = input.color(color.new(color.blue, 40),  "昨日亚洲 POC", group=grp_visual)
+lonPocColor  = input.color(color.new(color.purple, 40),"昨日欧洲 POC", group=grp_visual)
+nyPocColor   = input.color(color.new(color.orange, 40),"昨日纽约 POC", group=grp_visual)
+lineWidth    = input.int(2, "信号划线粗细", minval=1, group=grp_visual)
 
 // ==========================================
-// 5. 形态与成交量参数面板
+// 3. 核心计算：昨日三大盘面 POC
 // ==========================================
-grp_hammer = "--- 锤子线 (做多形态) 设置 ---"
-hamWickRatio = input.float(2.0, "下影线至少倍数", step=0.5, group=grp_hammer)
-hamHeadRatio = input.float(0.8, "上影线最多倍数", step=0.1, group=grp_hammer) 
+inAsia   = not na(time(timeframe.period, asiaSessTime, "GMT+11"))
+inLondon = not na(time(timeframe.period, londonSessTime, "GMT+11"))
+inNY     = not na(time(timeframe.period, nySessTime, "GMT+11"))
 
-grp_star = "--- 流星线 (做空形态) 设置 ---"
-starWickRatio = input.float(2.0, "上影线至少倍数", step=0.5, group=grp_star)
-starHeadRatio = input.float(0.8, "下影线最多倍数", step=0.1, group=grp_star) 
+var float asiaVWP = 0.0, var float asiaVol = 0.0, var float yestAsiaPOC = na
+var float lonVWP  = 0.0, var float lonVol  = 0.0, var float yestLonPOC  = na
+var float nyVWP   = 0.0, var float nyVol   = 0.0, var float yestNYPOC   = na
 
-grp_poc = "--- 微观 POC (多空平衡) 设置 ---"
-pocWickRatio = input.float(1.5, "上下影线至少倍数", step=0.1, group=grp_poc)
-pocSymRatio  = input.float(0.6, "对称度", step=0.1, maxval=1.0, group=grp_poc)
+if inAsia and not inAsia[1]
+    yestAsiaPOC := asiaVol > 0 ? asiaVWP / asiaVol : yestAsiaPOC
+    asiaVWP := 0.0, asiaVol := 0.0
+if inAsia
+    asiaVWP += hlc3 * volume, asiaVol += volume
 
-grp_vol = "--- 成交量过滤设置 ---"
-volLen  = input.int(50, "成交量均线周期", group=grp_vol)
-volMult = input.float(1.5, "放量阈值", step=0.1, group=grp_vol)
+if inLondon and not inLondon[1]
+    yestLonPOC := lonVol > 0 ? lonVWP / lonVol : yestLonPOC
+    lonVWP := 0.0, lonVol := 0.0
+if inLondon
+    lonVWP += hlc3 * volume, lonVol += volume
 
-// ==========================================
-// 6. 核心计算：VAH / VAL 与 价格波段 S/R 
-// ==========================================
-var float sumSrcVol = 0.0, var float sumVol = 0.0, var float sumSrcSrcVol = 0.0
-isNewDay = ta.change(time("D")) != 0
-if isNewDay
-    sumSrcVol := 0.0, sumVol := 0.0, sumSrcSrcVol := 0.0
+if inNY and not inNY[1]
+    yestNYPOC := nyVol > 0 ? nyVWP / nyVol : yestNYPOC
+    nyVWP := 0.0, nyVol := 0.0
+if inNY
+    nyVWP += hlc3 * volume, nyVol += volume
 
-src = hlc3
-sumSrcVol += src * volume, sumVol += volume, sumSrcSrcVol += volume * math.pow(src, 2)
-macroPOC = sumVol > 0 ? (sumSrcVol / sumVol) : src
-variance = sumVol > 0 ? ((sumSrcSrcVol / sumVol) - math.pow(macroPOC, 2)) : 0
-vwapStdev = math.sqrt(math.max(0, variance))
-VAH = macroPOC + (vwapStdev * sdMult)
-VAL = macroPOC - (vwapStdev * sdMult)
-
-plot(showVA ? VAH : na, title="VAH", color=color.new(color.red, 30), linewidth=2, style=plot.style_cross)
-plot(showVA ? VAL : na, title="VAL", color=color.new(color.green, 30), linewidth=2, style=plot.style_cross)
-plot(showVA ? macroPOC : na, title="Macro POC", color=color.new(color.orange, 30), linewidth=1, style=plot.style_circles)
-
-recentSwingHigh = ta.highest(high[1], swingLen)
-recentSwingLow  = ta.lowest(low[1], swingLen)
-
-plot(recentSwingHigh, color=color.new(color.red, 80), style=plot.style_circles, linewidth=1, title="Swing High")
-plot(recentSwingLow, color=color.new(color.green, 80), style=plot.style_circles, linewidth=1, title="Swing Low")
+plot(yestAsiaPOC, "昨日亚洲 POC", color=asiaPocColor, style=plot.style_linebr, linewidth=1)
+plot(yestLonPOC,  "昨日欧洲 POC", color=lonPocColor,  style=plot.style_linebr, linewidth=2)
+plot(yestNYPOC,   "昨日纽约 POC", color=nyPocColor,   style=plot.style_linebr, linewidth=2)
 
 // ==========================================
-// 7. 第一根：特征与成交量解剖 (Setup)
+// 4. 信号解剖 (PA + POC 逻辑)
 // ==========================================
+grp_pa = "--- 策略核心参数 ---"
+volMult = input.float(1.2, "放量阈值", step=0.1, group=grp_pa)
+swingLen = input.int(20, "波段周期", group=grp_pa)
+minRRFilter = input.float(1.2, "最低 RR 拦截", step=0.1, group=grp_pa)
+
 prevOpen = open[1], prevClose = close[1], prevHigh = high[1], prevLow = low[1], prevVol = volume[1]
-prevBody = math.abs(prevClose - prevOpen)
-prevUpper = prevHigh - math.max(prevOpen, prevClose)
-prevLower = math.min(prevOpen, prevClose) - prevLow
+prevBody = math.abs(prevClose - prevOpen), prevUpper = prevHigh - math.max(prevOpen, prevClose), prevLower = math.min(prevOpen, prevClose) - prevLow
+volBase = ta.sma(volume, 50)[1]
 
-volBase = ta.sma(volume, volLen)[1] 
-isPrevVolHigh = prevVol > (volBase * volMult)
+isPrevHammer = (prevLower >= prevBody * 2.0) and (prevUpper <= prevBody * 0.8) and (prevBody > 0)
+isPrevStar   = (prevUpper >= prevBody * 2.0) and (prevLower <= prevBody * 0.8) and (prevBody > 0)
+isPrevPOC = (prevUpper >= prevBody * 1.5) and (prevLower >= prevBody * 1.5) and (math.min(prevUpper, prevLower) / math.max(prevUpper, prevLower, 0.0001) >= 0.6) and (prevBody > 0)
 
-isPrevHammer = (prevLower >= prevBody * hamWickRatio) and (prevUpper <= prevBody * hamHeadRatio) and (prevBody > 0)
-isPrevStar   = (prevUpper >= prevBody * starWickRatio) and (prevLower <= prevBody * starHeadRatio) and (prevBody > 0)
+paBuyTrigger  = close > math.max(prevOpen, prevClose)
+paSellTrigger = close < math.min(prevOpen, prevClose)
 
-symmetry = math.min(prevUpper, prevLower) / math.max(prevUpper, prevLower, 0.0001)
-isPrevPOC = (prevUpper >= prevBody * pocWickRatio) and (prevLower >= prevBody * pocWickRatio) and (symmetry >= pocSymRatio) and (prevBody > 0)
-isImportantPOC = isPrevPOC and isPrevVolHigh
-
-// ==========================================
-// 8. 第二根：量价确认 (Trigger) 
-// ==========================================
-isCurrVolHigh = volume > (volBase * volMult) 
-validVolForPA = isPrevVolHigh or isCurrVolHigh
-
-paBuyLimit  = isStrictPA ? prevHigh : math.max(prevOpen, prevClose)
-paSellLimit = isStrictPA ? prevLow  : math.min(prevOpen, prevClose)
-pocBuyLimit = isStrictPOC ? prevHigh : prevClose
-pocSellLimit= isStrictPOC ? prevLow  : prevClose
-
-paBuyTrigger  = close > paBuyLimit
-paSellTrigger = close < paSellLimit
-pocBuyTrigger  = close > pocBuyLimit
-pocSellTrigger = close < pocSellLimit
-
-paBuy  = enablePA  and isPrevHammer and paBuyTrigger and validVolForPA
-paSell = enablePA  and isPrevStar   and paSellTrigger and validVolForPA
-pocBuy = enablePOC and isImportantPOC and pocBuyTrigger
-pocSell= enablePOC and isImportantPOC and pocSellTrigger
+paBuy  = isPrevHammer and paBuyTrigger and (prevVol > volBase * volMult or volume > volBase * volMult)
+paSell = isPrevStar and paSellTrigger and (prevVol > volBase * volMult or volume > volBase * volMult)
+pocBuy = isPrevPOC and prevVol > volBase * volMult and close > prevHigh
+pocSell= isPrevPOC and prevVol > volBase * volMult and close < prevLow
 
 // ==========================================
-// 9. 综合信号与 可视化画线 (跨品种精度修复)
+// 5. 宏微联动过滤核心逻辑
 // ==========================================
-finalBuy  = paBuy or pocBuy
-finalSell = paSell or pocSell
+threshold = proxTicks * syminfo.mintick
+isNearAsia = math.abs(close - yestAsiaPOC) <= threshold
+isNearLon  = math.abs(close - yestLonPOC)  <= threshold
+isNearNY   = math.abs(close - yestNYPOC)   <= threshold
+isNearMacro = isNearAsia or isNearLon or isNearNY
 
-plotshape(enablePA  and isPrevHammer and not finalBuy, title="Wait PA", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 60), size=size.tiny, offset=-1)
-plotshape(enablePA  and isPrevStar   and not finalSell, title="Wait PA", style=shape.circle, location=location.abovebar, color=color.new(color.gray, 60), size=size.tiny, offset=-1)
-plotshape(enablePOC and isImportantPOC and not (pocBuy or pocSell), title="Wait POC", style=shape.diamond, location=location.abovebar, color=color.new(color.blue, 50), size=size.tiny, offset=-1)
+// 最终进场条件
+validBuy  = (paBuy or pocBuy) and (not useMacroFilter or isNearMacro)
+validSell = (paSell or pocSell) and (not useMacroFilter or isNearMacro)
 
-plotshape(paBuy,  title="PA BUY",   text="PA BUY",   style=shape.labelup,   location=location.belowbar, color=color.green, size=size.small, textcolor=color.white)
-plotshape(paSell, title="PA SELL",  text="PA SELL",  style=shape.labeldown, location=location.abovebar, color=color.red,   size=size.small, textcolor=color.white)
-plotshape(pocBuy, title="POC BUY",  text="POC UP",   style=shape.labelup,   location=location.belowbar, color=color.teal,  size=size.small, textcolor=color.white)
-plotshape(pocSell,title="POC SELL", text="POC DOWN", style=shape.labeldown, location=location.abovebar, color=color.maroon,size=size.small, textcolor=color.white)
+// 视觉差异化：过滤掉的信号打灰色点，通过的打彩色标签
+plotshape(not validBuy and (paBuy or pocBuy), title="被过滤的多头信号", style=shape.circle, location=location.belowbar, color=color.new(color.gray, 70), size=size.tiny)
+plotshape(not validSell and (paSell or pocSell), title="被过滤的空头信号", style=shape.circle, location=location.abovebar, color=color.new(color.gray, 70), size=size.tiny)
 
-lineLen = 15
-actualBuffer = slTicks * syminfo.mintick // 将设定的跳动点数转换为该品种的真实价格差
-
-if finalBuy
-    entryPrice = paBuy ? paBuyLimit : pocBuyLimit
-    tradeTag   = paBuy ? "[PA BUY]" : "[POC BUY]"
-    
-    slPrice = (slMode == "1. 紧贴形态极值 (最优盈亏比)") ? (prevLow - actualBuffer) : (recentSwingLow - actualBuffer)
-    
-    // 止盈模式判断逻辑
-    tpPrice = 0.0
-    if targetMode == "2. 固定自定义盈亏比 (Fixed RR)"
-        tpPrice := entryPrice + (entryPrice - slPrice) * customRR
-    else
-        tpPrice := recentSwingHigh
-        if tpPrice <= entryPrice
-            tpPrice := entryPrice + (entryPrice - slPrice) * customRR
-        
-    risk = entryPrice - slPrice
-    reward = tpPrice - entryPrice
-    rrRatio = risk > 0 ? (reward / risk) : 0
-    rrText = (targetMode == "2. 固定自定义盈亏比 (Fixed RR)" or tpPrice != recentSwingHigh) ? " (固定 RR: " + str.tostring(rrRatio, "#.#") + ")" : " (RR: " + str.tostring(rrRatio, "#.#") + ")"
-
-    // 修复：读取品种原生精度 format.mintick
-    line.new(bar_index, tpPrice, bar_index + lineLen, tpPrice, color=color.green, width=2, style=line.style_dashed)
-    label.new(bar_index + lineLen, tpPrice, "TP: " + str.tostring(tpPrice, format.mintick) + rrText, color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
-    
-    line.new(bar_index, entryPrice, bar_index + lineLen, entryPrice, color=color.yellow, width=2, style=line.style_solid)
-    label.new(bar_index + lineLen, entryPrice, tradeTag + " LIMIT: " + str.tostring(entryPrice, format.mintick), color=color.yellow, textcolor=color.black, style=label.style_label_left, size=size.small)
-
-    line.new(bar_index, slPrice, bar_index + lineLen, slPrice, color=color.red, width=3, style=line.style_dashed)
-    label.new(bar_index + lineLen, slPrice, "SL: " + str.tostring(slPrice, format.mintick), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
-
-if finalSell
-    entryPrice = paSell ? paSellLimit : pocSellLimit
-    tradeTag   = paSell ? "[PA SELL]" : "[POC SELL]"
-
-    slPrice = (slMode == "1. 紧贴形态极值 (最优盈亏比)") ? (prevHigh + actualBuffer) : (recentSwingHigh + actualBuffer)
-    
-    // 止盈模式判断逻辑
-    tpPrice = 0.0
-    if targetMode == "2. 固定自定义盈亏比 (Fixed RR)"
-        tpPrice := entryPrice - (slPrice - entryPrice) * customRR
-    else
-        tpPrice := recentSwingLow
-        if tpPrice >= entryPrice
-            tpPrice := entryPrice - (slPrice - entryPrice) * customRR
-        
-    risk = slPrice - entryPrice
-    reward = entryPrice - tpPrice
-    rrRatio = risk > 0 ? (reward / risk) : 0
-    rrText = (targetMode == "2. 固定自定义盈亏比 (Fixed RR)" or tpPrice != recentSwingLow) ? " (固定 RR: " + str.tostring(rrRatio, "#.#") + ")" : " (RR: " + str.tostring(rrRatio, "#.#") + ")"
-
-    // 修复：读取品种原生精度 format.mintick
-    line.new(bar_index, tpPrice, bar_index + lineLen, tpPrice, color=color.green, width=2, style=line.style_dashed)
-    label.new(bar_index + lineLen, tpPrice, "TP: " + str.tostring(tpPrice, format.mintick) + rrText, color=color.green, textcolor=color.white, style=label.style_label_left, size=size.small)
-    
-    line.new(bar_index, entryPrice, bar_index + lineLen, entryPrice, color=color.yellow, width=2, style=line.style_solid)
-    label.new(bar_index + lineLen, entryPrice, tradeTag + " LIMIT: " + str.tostring(entryPrice, format.mintick), color=color.yellow, textcolor=color.black, style=label.style_label_left, size=size.small)
-
-    line.new(bar_index, slPrice, bar_index + lineLen, slPrice, color=color.red, width=3, style=line.style_dashed)
-    label.new(bar_index + lineLen, slPrice, "SL: " + str.tostring(slPrice, format.mintick), color=color.red, textcolor=color.white, style=label.style_label_left, size=size.small)
+plotshape(validBuy,  title="高价值买入", text="INSTITUTIONAL\nBUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(validSell, title="高价值卖出", text="INSTITUTIONAL\nSELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
 
 // ==========================================
-// 10. 独立专属警报系统
+// 6. 执行与告警
 // ==========================================
-alertcondition(paBuy,  "PA 做多",  "锤子线破位确认！寻找黄线挂单。")
-alertcondition(paSell, "PA 做空",  "流星线破位确认！寻找黄线挂单。")
-alertcondition(pocBuy, "POC 向上突破", "多空平衡打破！强逼空行情准备入场！")
-alertcondition(pocSell,"POC 向下突破", "多空平衡打破！强逼多行情准备入场！")
+if validBuy
+    entryPrice = close
+    slPrice = prevLow - 10 * syminfo.mintick
+    tpPrice = entryPrice + (entryPrice - slPrice) * 1.5
+    if (tpPrice - entryPrice) / (entryPrice - slPrice) >= minRRFilter
+        strategy.entry("Long", strategy.long)
+        alert("💰 机构博弈多头进场! 入场:" + str.tostring(entryPrice), alert.freq_once_per_bar)
+
+if validSell
+    entryPrice = close
+    slPrice = prevHigh + 10 * syminfo.mintick
+    tpPrice = entryPrice - (slPrice - entryPrice) * 1.5
+    if (entryPrice - tpPrice) / (slPrice - entryPrice) >= minRRFilter
+        strategy.entry("Short", strategy.short)
+        alert("💰 机构博弈空头进场! 入场:" + str.tostring(entryPrice), alert.freq_once_per_bar)
